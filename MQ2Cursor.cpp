@@ -1,13 +1,15 @@
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
-// Projet: MQ2Cursor.cpp    | Fix Random Humanish Delay that was'nt working!
+// Projet: MQ2Cursor.cpp    | Fix Random Humanish Delay that wasn't working!
 // Author: s0rCieR          | Make it more user friendly for twisting bard!
 // Updated: eqmule 12/15/14 | Updated to work with The Darkened Sea expansion
 // 4.0 - Eqmule 07-22-2016 - Added string safety.
+// 4.1 - Sym - 06-13-2017 - Removed forced 1 count for non-stackable keep counts
+//                          and added notification when removing an entry
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
 #define    PLUGIN_NAME  "MQ2Cursor"     // Plugin Name
-#define    PLUGIN_DATE    20160725      // Plugin Date
-#define    PLUGIN_VERS       4.0        // Plugin Version
+#define    PLUGIN_DATE    20170613      // Plugin Date
+#define    PLUGIN_VERS       4.1        // Plugin Version
 #define    PLUGIN_FLAG      0xF9FF      // Plugin Auto-Pause Flags (see InStat)
 #define    CURSOR_SPAM       15000      // Cursor Spam Rate Instruction in ms.
 #define    CURSOR_WAIT         250    // Cursor Wait After Manipulation
@@ -24,9 +26,9 @@
 
 #include "../moveitem.h"
 
-DWORD            Initialized   =false;            // Plugin Initialized?
-DWORD            Conditions   =false;            // Window Conditions and Character State
-DWORD            SkipExecuted=false;            // Skip Executed Timer
+DWORD            Initialized =false;       // Plugin Initialized?
+DWORD            Conditions  =false;       // Window Conditions and Character State
+DWORD            SkipExecuted=false;       // Skip Executed Timer
 
 PCONTENTS     InvCont     =NULL;           // ItemCounts/Locate/Search Contents
 long          InvSlot     =NOID;           // ItemCounts/Locate/Search Slot ID
@@ -44,11 +46,11 @@ bool          WinState(CXWnd *Wnd);
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 template <unsigned int _Size>LPSTR SafeItoa(int _Value,char(&_Buffer)[_Size], int _Radix)
 {
-	errno_t err = _itoa_s(_Value, _Buffer, _Radix);
-	if (!err) {
-		return _Buffer;
-	}
-	return "";
+    errno_t err = _itoa_s(_Value, _Buffer, _Radix);
+    if (!err) {
+        return _Buffer;
+    }
+    return "";
 }
 bool WinState(CXWnd *Wnd) {
     return (Wnd && ((PCSIDLWND)Wnd)->dShow);
@@ -185,7 +187,7 @@ public:
       }
     }
   }
- 
+
   void Export(PCHAR Title) {
     if(Title[0]) WriteChatColor(Title);
     char KEY[MAX_STRING]; char BUF[MAX_STRING];
@@ -196,7 +198,7 @@ public:
       WritePrivateProfileString(section,SafeItoa(DTA->id,KEY,10),BUF,INIFileName);
     }
   }
- 
+
   void Listing(PCHAR Title, PCHAR Search) {
     if(Title[0]) WriteChatColor(Title);
     WriteChatColor("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-");
@@ -293,7 +295,7 @@ void KeepCommand(PSPAWNINFO pCHAR, PCHAR zLine)
             SendWornClick(szInvSlot, SHIFTKEY);
             // if we swapped something (bag on cursor) autoinv it
             if (CursorHasItem())
-				DoCommand((PSPAWNINFO)pCharSpawn,"/autoinventory");
+                DoCommand((PSPAWNINFO)pCharSpawn,"/autoinventory");
         }
     }
 }
@@ -333,15 +335,15 @@ void CursorCommand(PSPAWNINFO pCHAR, PCHAR zLine)
   else if(!_stricmp("load",Parm1)) CursorList->Import("MQ2Cursor::\ayLOADING\ax Item List...");
   else if(!_stricmp("save",Parm1)) CursorList->Export("MQ2Cursor::\aySAVING\ax Item List...");
   else if(!_stricmp("list",Parm1)) CursorList->Listing("MQ2Cursor::\ayLISTING\ax Item List...",Parm2);
-  //else if(!_stricmp("nodrop",Parm1) || !_stricmp("dropping",Parm1)) 
+  //else if(!_stricmp("nodrop",Parm1) || !_stricmp("dropping",Parm1))
      //CursorDroping=SetBOOL(CursorDroping,Parm2,"MQ2Cursor","Droping");
-  else if(!_stricmp("silent",Parm1) || !_stricmp("quiet",Parm1))     
+  else if(!_stricmp("silent",Parm1) || !_stricmp("quiet",Parm1))
      CursorSilent=SetBOOL(CursorSilent ,Parm2,"MQ2Cursor","Silent");
-  else if(!_stricmp("on",Parm1) || !_stricmp("true",Parm1))           
+  else if(!_stricmp("on",Parm1) || !_stricmp("true",Parm1))
      CursorHandle=SetBOOL(CursorHandle ,"on" ,"MQ2Cursor","Active");
-  else if(!_stricmp("off",Parm1) || !_stricmp("false",Parm1))         
+  else if(!_stricmp("off",Parm1) || !_stricmp("false",Parm1))
      CursorHandle=SetBOOL(CursorHandle ,"off","MQ2Cursor","Active");
-  else if(!_stricmp("auto",Parm1))                                   
+  else if(!_stricmp("auto",Parm1))
      CursorHandle=SetBOOL(CursorHandle ,""   ,"MQ2Cursor","Active");
   else if(!_stricmp("random",Parm1))
      CursorRandom=SetLONG(CursorRandom,Parm2 ,"MQ2Cursor","Random",true,15000);
@@ -350,6 +352,7 @@ void CursorCommand(PSPAWNINFO pCHAR, PCHAR zLine)
     if(!_strnicmp("rem",Parm1,3) || !_strnicmp("del",Parm1,3)) {
       if(!Parm2[0] && Cursor) SafeItoa(GetItemFromContents(Cursor)->ItemNumber,Parm2,10);
       if(Parm2[0] && IsNumber(Parm2)) {
+        WriteChatf ("MQ2Cursor::\ayDELETING ENTRY\ax <\ag%s\ax>.", GetItemFromContents(Cursor)->Name);
         CursorList->Delete((DWORD)atol(Parm2),CursorSilent);
         CursorList->Export("");
         return;
@@ -364,7 +367,7 @@ void CursorCommand(PSPAWNINFO pCHAR, PCHAR zLine)
         if(!_strnicmp(Parm1,"pro",3))        HowMany=-2;
         else if(!_strnicmp(Parm1,"al",2))    HowMany=-1;
         else if(!_strnicmp(Parm2,"st",2))    HowMany*=StackSize(Cursor);
-        if(HowMany>1 && !ItemIsStackable(Cursor)) HowMany=1;
+        //if(HowMany>1 && !ItemIsStackable(Cursor)) HowMany=1;
         PITEMINFO pCursor = GetItemFromContents(Cursor);
         if(HowMany < -1)    WriteChatf("MQ2Cursor::\ayPROTECT\ax <\ag%s\ax> [\agALL\ax].", pCursor->Name);
         else if(HowMany <0) WriteChatf("MQ2Cursor::\ayKEEPING\ax <\ag%s\ax> [\agALL\ax].", pCursor->Name);
@@ -395,7 +398,7 @@ void CursorCommand(PSPAWNINFO pCHAR, PCHAR zLine)
     WriteChatColor("       /cursor random #");
   }
 }
-   
+
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
