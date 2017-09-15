@@ -19,6 +19,7 @@
 
 #ifndef PLUGIN_API
   #include "../MQ2Plugin.h"
+using namespace std;
   PreSetup(PLUGIN_NAME);
   PLUGIN_VERSION(PLUGIN_VERS);
   #include <map>
