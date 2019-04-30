@@ -54,7 +54,7 @@ template <unsigned int _Size>LPSTR SafeItoa(int _Value,char(&_Buffer)[_Size], in
     return "";
 }
 bool WinState(CXWnd *Wnd) {
-    return (Wnd && ((PCSIDLWND)Wnd)->dShow);
+    return (Wnd && ((PCSIDLWND)Wnd)->IsVisible());
 }
 
 long StackUnit(PCONTENTS Item) {
