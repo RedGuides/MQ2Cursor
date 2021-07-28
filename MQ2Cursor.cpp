@@ -8,7 +8,7 @@
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
 #include <mq/Plugin.h>
-#include "moveitem.h"
+#include <moveitem.h>
 
 PreSetup("MQ2Cursor");
 PLUGIN_VERSION(4.1);
@@ -44,17 +44,17 @@ template <unsigned int _Size>LPSTR SafeItoa(int _Value,char(&_Buffer)[_Size], in
 	return "";
 }
 bool WinState(CXWnd *Wnd) {
-	return (Wnd && ((PCSIDLWND)Wnd)->IsVisible());
+	return (Wnd && Wnd->IsVisible());
 }
 
 long StackUnit(PCONTENTS Item) {
 	PITEMINFO pItemInfo = GetItemFromContents(Item);
-	return (pItemInfo && pItemInfo->Type == ITEMTYPE_NORMAL && ((EQ_Item*)Item)->IsStackable() == 1) ? Item->StackCount : 1;
+	return (pItemInfo && pItemInfo->Type == ITEMTYPE_NORMAL && Item->IsStackable()) ? Item->StackCount : 1;
 }
 
 long StackSize(PCONTENTS Item) {
 	PITEMINFO pItemInfo = GetItemFromContents(Item);
-	return (pItemInfo && pItemInfo->Type == ITEMTYPE_NORMAL && ((EQ_Item*)Item)->IsStackable() == 1) ? pItemInfo->StackSize : 1;
+	return (pItemInfo && pItemInfo->Type == ITEMTYPE_NORMAL && Item->IsStackable()) ? pItemInfo->StackSize : 1;
 }
 
 long SetLONG(long Cur,PCHAR Val, PCHAR Sec, PCHAR Key, bool ZeroIsOff,long Maxi) {
@@ -99,7 +99,7 @@ long InStat() {
 }
 
 PCONTENTS CursorContents() {
-	return GetCharInfo2()->pInventoryArray->Inventory.Cursor;
+	return GetPcProfile()->GetInventorySlot(InvSlot_Cursor);
 }
 
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
@@ -220,10 +220,10 @@ void DestroyCommand()
 	if(!(PLUGIN_FLAG&(Conditions)))
 	{
 		char Buffers[128]; PCHAR Display=Buffers;
-		if(GetCharInfo2()->CursorPlat)        Display="MQ2Cursor::\ayDESTROYING\ax <\arPlat\ax>.";
-		else if(GetCharInfo2()->CursorGold)   Display="MQ2Cursor::\ayDESTROYING\ax <\arGold\ax>.";
-		else if(GetCharInfo2()->CursorSilver) Display="MQ2Cursor::\ayDESTROYING\ax <\arSilver\ax>.";
-		else if(GetCharInfo2()->CursorCopper) Display="MQ2Cursor::\ayDESTROYING\ax <\arCopper\ax>.";
+		if(GetPcProfile()->CursorPlat)        Display="MQ2Cursor::\ayDESTROYING\ax <\arPlat\ax>.";
+		else if(GetPcProfile()->CursorGold)   Display="MQ2Cursor::\ayDESTROYING\ax <\arGold\ax>.";
+		else if(GetPcProfile()->CursorSilver) Display="MQ2Cursor::\ayDESTROYING\ax <\arSilver\ax>.";
+		else if(GetPcProfile()->CursorCopper) Display="MQ2Cursor::\ayDESTROYING\ax <\arCopper\ax>.";
 		else if(PCONTENTS Cursor=CursorContents()) sprintf_s(Buffers,"MQ2Cursor::\ayDESTROYING\ax <\ar%s\ax>.", GetItemFromContents(Cursor)->Name);
 		else return;
 		if(!CursorSilent) WriteChatColor(Display);
@@ -240,6 +240,21 @@ void DropCommand() {
 	}
 }
 */
+
+void SendWornClick(char* pcScreenID, unsigned long ulKeyState)
+{
+	if (pInventoryWnd)
+	{
+		if (CXWnd* wndInv = pInventoryWnd->GetChildItem(pcScreenID))
+		{
+			int KeyboardFlags[4] = { 0 };
+			*(unsigned long*)&KeyboardFlags = *(unsigned long*)&pWndMgr->KeyboardFlags;
+			*(unsigned long*)&pWndMgr->KeyboardFlags = ulKeyState;
+			SendWndClick2(wndInv, "leftmouseup");
+			*(unsigned long*)&pWndMgr->KeyboardFlags = *(unsigned long*)&KeyboardFlags;
+		}
+	}
+}
 
 void KeepCommand(PSPAWNINFO pCHAR, PCHAR zLine)
 {
@@ -278,15 +293,15 @@ void KeepCommand(PSPAWNINFO pCHAR, PCHAR zLine)
 		char szInvSlot[20];
 		if (lSlot == NOID) // if the slot is accessed via autoinventory
 		{
-			DoCommand((PSPAWNINFO)pCharSpawn,"/autoinventory");
+			EzCommand("/autoinventory");
 		}
 		else
 		{
 			sprintf_s(szInvSlot, "InvSlot%d", lSlot);
-			SendWornClick(szInvSlot, SHIFTKEY);
+			SendWornClick(szInvSlot, 1);
 			// if we swapped something (bag on cursor) autoinv it
 			if (CursorHasItem())
-				DoCommand((PSPAWNINFO)pCharSpawn,"/autoinventory");
+				EzCommand("/autoinventory");
 		}
 	}
 }
@@ -397,7 +412,7 @@ PLUGIN_API VOID SetGameState(DWORD GameState) {
 	if(GameState==GAMESTATE_INGAME) {
 		if(!Initialized) {
 			Initialized=true;
-			sprintf_s(INIFileName,"%s\\%s_%s.ini",gszINIPath,EQADDR_SERVERNAME,GetCharInfo()->Name);
+			sprintf_s(INIFileName,"%s\\%s_%s.ini", gPathConfig, EQADDR_SERVERNAME, GetCharInfo()->Name);
 			CursorList=new ListRec("MQ2Cursor_ItemList");
 			CursorList->Import("");
 			CursorHandle   =GetPrivateProfileInt("MQ2Cursor","Active"  ,0,INIFileName);
@@ -428,7 +443,7 @@ PLUGIN_API VOID ShutdownPlugin() {
 
 PLUGIN_API VOID OnPulse()
 {
-	if(Initialized && gbInZone && pCharSpawn && GetCharInfo2() && !(PLUGIN_FLAG&InStat()))
+	if(Initialized && gbInZone && pCharSpawn && GetPcProfile() && !(PLUGIN_FLAG&InStat()))
 	{
 		DWORD PulseTimer=(DWORD)clock();
 		if(CursorHandle && CursorContents() && PulseTimer>SkipExecuted)
