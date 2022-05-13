@@ -412,7 +412,7 @@ PLUGIN_API VOID SetGameState(DWORD GameState) {
 	if(GameState==GAMESTATE_INGAME) {
 		if(!Initialized) {
 			Initialized=true;
-			sprintf_s(INIFileName,"%s\\%s_%s.ini", gPathConfig, EQADDR_SERVERNAME, GetCharInfo()->Name);
+			sprintf_s(INIFileName,"%s\\%s_%s.ini", gPathConfig, GetServerShortName(), pLocalPC->Name);
 			CursorList=new ListRec("MQ2Cursor_ItemList");
 			CursorList->Import("");
 			CursorHandle   =GetPrivateProfileInt("MQ2Cursor","Active"  ,0,INIFileName);
