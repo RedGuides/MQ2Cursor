@@ -27,22 +27,15 @@ long          InvSlot     =NOID;           // ItemCounts/Locate/Search Slot ID
 PCONTENTS     CursorContents();
 long          InStat();
 long          ItemCounts(DWORD ID, long B=0, long E=NUM_INV_SLOTS);
-long          SetBOOL(long Cur, PCHAR Val, PCHAR Sec="", PCHAR Key="");
-long          SetLONG(long Cur, PCHAR Val, PCHAR Sec="", PCHAR Key="", bool ZeroIsOff=false);
+long          SetBOOL(long Cur, const char* Val, const char* Sec="", const char* Key="");
+long          SetLONG(long Cur, const char* Val, const char* Sec="", const char* Key="", bool ZeroIsOff=false);
 long          StackSize(PCONTENTS Item);
 long          StackUnit(PCONTENTS Item);
 bool          WinState(CXWnd *Wnd);
 
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
-template <unsigned int _Size>LPSTR SafeItoa(int _Value,char(&_Buffer)[_Size], int _Radix)
-{
-	errno_t err = _itoa_s(_Value, _Buffer, _Radix);
-	if (!err) {
-		return _Buffer;
-	}
-	return "";
-}
+
 bool WinState(CXWnd *Wnd) {
 	return (Wnd && Wnd->IsVisible());
 }
@@ -57,7 +50,7 @@ long StackSize(PCONTENTS Item) {
 	return (pItemInfo && pItemInfo->Type == ITEMTYPE_NORMAL && Item->IsStackable()) ? pItemInfo->StackSize : 1;
 }
 
-long SetLONG(long Cur,PCHAR Val, PCHAR Sec, PCHAR Key, bool ZeroIsOff,long Maxi) {
+long SetLONG(long Cur, const char* Val, const char* Sec, const char* Key, bool ZeroIsOff, long Maxi) {
 	char ToStr[16]; char Buffer[128]; long Result=atol(Val);
 	if(Result && Result>Maxi) Result=Maxi;
 	_itoa_s(Result,ToStr,10);
@@ -67,7 +60,7 @@ long SetLONG(long Cur,PCHAR Val, PCHAR Sec, PCHAR Key, bool ZeroIsOff,long Maxi)
 	return Result;
 }
 
-long SetBOOL(long Cur, PCHAR Val, PCHAR Sec, PCHAR Key) {
+long SetBOOL(long Cur, const char* Val, const char* Sec, const char* Key) {
 	char buffer[128]; long result=0;
 	if(!_strnicmp(Val,"false",5) || !_strnicmp(Val,"off",3) || !_strnicmp(Val,"0",1))    result=0;
 	else if(!_strnicmp(Val,"true",4) || !_strnicmp(Val,"on",2) || !_strnicmp(Val,"1",1)) result=1;
@@ -105,97 +98,143 @@ PCONTENTS CursorContents() {
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
-class KeepRec {
+class KeepRec
+{
 public:
-	char name[ITEM_NAME_LEN];
-	long id;
-	long qty;
+	std::string name;
+	int id;
+	int qty;
 
-	KeepRec(PCHAR n, long i, long q) {
-		strcpy_s(name,n);
-		id=i;
-		qty=q;
+	KeepRec(std::string_view name, int id, int qty)
+		: name(name)
+		, id(id)
+		, qty(qty)
+	{
 	}
 
-	KeepRec(PCHAR k, PCHAR d) {
+	KeepRec(std::string_view id_, const char* str)
+	{
 		char Buffer[MAX_STRING];
-		strcpy_s(name,GetArg(Buffer,d,1,FALSE,FALSE,FALSE,'|'));
-		qty   =atol(GetArg(Buffer,d,2,FALSE,FALSE,FALSE,'|'));
-		id    =atol(k);
+		name = GetArg(Buffer, str, 1, false, false, false, '|');
+		qty = GetIntFromString(GetArg(Buffer, str, 2, false, false, false, '|'), 0);
+		id = GetIntFromString(id_, 0);
 	}
 
-	void Display(char ACTION) {
-		if(ACTION!='-') {
+	void Display(char action) const
+	{
+		if (action != '-')
+		{
 			char buffer[32];
-			if(qty<-1)     strcpy_s(buffer," \agPROTECTED\ax");
-			else if(qty<0) strcpy_s(buffer," QTY[\agALL\ax]");
-			else if(!qty)  strcpy_s(buffer," QTY[\agNONE\ax]");
-			else sprintf_s(buffer," QTY[\ag%d\ax]",qty);
-			if(ACTION=='+') WriteChatf("[\ag+\ax] ID[\ag%d\ax] NAME[\ag%s\ax]%s.",id,name,buffer);
-			else WriteChatf("[\ay=\ax] ID[\ag%d\ax] NAME[\ag%s\ax]%s FIND[\ag%d\ax].",id,name,buffer, (long)CountItemByID(id, BAG_SLOT_START));
-		} else WriteChatf("[\ar-\ax] ID[\ag%d\ax] NAME[\ag%s\ax].",id,name);
+			if (qty < -1)
+				strcpy_s(buffer, " \agPROTECTED\ax");
+			else if (qty < 0)
+				strcpy_s(buffer, " QTY[\agALL\ax]");
+			else if (!qty)
+				strcpy_s(buffer, " QTY[\agNONE\ax]");
+			else
+				sprintf_s(buffer, " QTY[\ag%d\ax]", qty);
+
+			if (action == '+')
+				WriteChatf("[\ag+\ax] ID[\ag%d\ax] NAME[\ag%s\ax]%s.", id, name.c_str(), buffer);
+			else
+				WriteChatf("[\ay=\ax] ID[\ag%d\ax] NAME[\ag%s\ax]%s FIND[\ag%d\ax].", id, name.c_str(), buffer, CountItemByID(id, BAG_SLOT_START));
+		}
+		else
+		{
+			WriteChatf("[\ar-\ax] ID[\ag%d\ax] NAME[\ag%s\ax].", id, name.c_str());
+		}
 	}
 };
 
-class ListRec {
-	std::map<long,KeepRec>::iterator f; // data iterator
-	std::map<long,KeepRec>        data; // data storages
-	char              section[32]; // name inifile section
+class ListRec
+{
+	std::map<int, KeepRec> data;
+	std::string section;
+
 public:
-
-	ListRec(PCHAR s) {
-		strcpy_s(section,s);
-		data.clear();
-		f=data.end();
+	explicit ListRec(std::string_view section)
+		: section(section)
+	{
 	}
 
-	KeepRec* Find(long KEY) {
-		return(data.end()==(f=data.find(KEY)))?NULL:&(*f).second;
+	KeepRec* Find(int key)
+	{
+		auto iter = data.find(key);
+		if (iter == data.end())
+			return nullptr;
+
+		return &iter->second;
 	}
 
-	void Delete(long KEY, long QUIET) {
-		if(data.end()!=(f=data.find(KEY))) {
-			if(!QUIET) (*f).second.Display('-');
-			data.erase(f);
+	void Delete(int key, bool quiet)
+	{
+		auto iter = data.find(key);
+		if (iter != data.end())
+		{
+			if (!quiet)
+				iter->second.Display('-');
+
+			data.erase(iter);
 		}
 	}
 
-	void Insert(KeepRec REC, long QUIET) {
-		Delete(REC.id,true);
-		data.insert(std::map<long,KeepRec>::value_type(REC.id,REC));
-		if(!QUIET) REC.Display('+');
+	void Insert(const KeepRec& rec, bool quiet)
+	{
+		Delete(rec.id, true);
+		data.emplace(rec.id, rec);
+
+		if (!quiet)
+			rec.Display('+');
 	}
 
-	void Import(PCHAR Title) {
-		if(Title[0]) WriteChatColor(Title);
-		char Keys[MAX_STRING*10]={0};
-		if(GetPrivateProfileString(section,NULL,"",Keys,MAX_STRING*10,INIFileName)) {
-			PCHAR pKeys=Keys; char Temp[MAX_STRING];
-			while(pKeys[0]) {
-				GetPrivateProfileString(section,pKeys,"",Temp,MAX_STRING,INIFileName);
-				if(Temp[0]) Insert(KeepRec(pKeys,Temp),true);
-				pKeys+=strlen(pKeys)+1;
-			}
+	void Import(const char* Title)
+	{
+		if (Title[0])
+			WriteChatColor(Title);
+
+		std::vector<std::string> keys = mq::GetPrivateProfileKeys<MAX_STRING * 10>(section, INIFileName);
+		char Temp[MAX_STRING];
+
+		for (const std::string& key : keys)
+		{
+			GetPrivateProfileString(section, key.c_str(), "", Temp, MAX_STRING, INIFileName);
+			if (Temp[0])
+				Insert(KeepRec(key.c_str(), Temp), true);
 		}
 	}
 
-	void Export(PCHAR Title) {
-		if(Title[0]) WriteChatColor(Title);
-		char KEY[MAX_STRING]; char BUF[MAX_STRING];
-		WritePrivateProfileString(section,NULL,NULL,INIFileName);
-		for(f=data.begin(); f!=data.end(); f++) {
-			KeepRec *DTA=&(*f).second;
-			if(DTA->qty!=0) sprintf_s(BUF,"%s|%d",DTA->name,DTA->qty); else strcpy_s(BUF,DTA->name);
-			WritePrivateProfileString(section,SafeItoa(DTA->id,KEY,10),BUF,INIFileName);
+	void Export(const char* Title)
+	{
+		if (Title[0])
+			WriteChatColor(Title);
+
+		WritePrivateProfileString(section, nullptr, nullptr, INIFileName);
+
+		char BUF[MAX_STRING];
+		for (const auto& [_, rec] : data)
+		{
+			if (rec.qty != 0)
+				sprintf_s(BUF, "%s|%d", rec.name.c_str(), rec.qty);
+			else
+				strcpy_s(BUF, rec.name.c_str());
+
+			WritePrivateProfileString(section, std::to_string(rec.id), BUF, INIFileName);
 		}
 	}
 
-	void Listing(PCHAR Title, PCHAR Search) {
-		if(Title[0]) WriteChatColor(Title);
+	void Listing(const char* Title, const char* Search)
+	{
+		if (Title[0])
+			WriteChatColor(Title);
+
 		WriteChatColor("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-");
-		for(f=data.begin(); f!=data.end(); f++)
-			if(!Search[0] || strstr((*f).second.name,Search))
-				(*f).second.Display('=');
+
+		for (const auto& [_, rec] : data)
+		{
+			if (!Search[0] || find_substr(rec.name, Search))
+				rec.Display('=');
+		}
+
 		WriteChatColor("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-");
 	}
 };
@@ -203,14 +242,13 @@ public:
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
-long       CursorHandle      = false;    // Cursor Handle?
-long       CursorSilent      = false;    // Cursor Silent Operating?
-//long       CursorDroping     = false;    // Cursor Drop Droppable Stuff?
+bool       CursorHandle      = false;    // Cursor Handle?
+bool       CursorSilent      = false;    // Cursor Silent Operating?
 long       CursorWarnItem    = NOID;     // Cursor Warned Item ID
 long       CursorWarnTime    = 0;        // Cursor Warned Time ID
 long       CursorRandom      = 0;        // Cursor Random Wait
 DWORD      CursorTimer       = 0;        // Cursor Timer
-ListRec   *CursorList        = 0;        // Cursor Keeping List
+ListRec*   CursorList        = nullptr;  // Cursor Keeping List
 
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
@@ -219,7 +257,7 @@ void DestroyCommand()
 {
 	if(!(PLUGIN_FLAG&(Conditions)))
 	{
-		char Buffers[128]; PCHAR Display=Buffers;
+		char Buffers[128]; const char* Display=Buffers;
 		if(GetPcProfile()->CursorPlat)        Display="MQ2Cursor::\ayDESTROYING\ax <\arPlat\ax>.";
 		else if(GetPcProfile()->CursorGold)   Display="MQ2Cursor::\ayDESTROYING\ax <\arGold\ax>.";
 		else if(GetPcProfile()->CursorSilver) Display="MQ2Cursor::\ayDESTROYING\ax <\arSilver\ax>.";
@@ -256,7 +294,7 @@ void SendWornClick(char* pcScreenID, unsigned long ulKeyState)
 	}
 }
 
-void KeepCommand(PSPAWNINFO pCHAR, PCHAR zLine)
+void KeepCommand(PlayerClient*, const char* zLine)
 {
 	if (PLUGIN_FLAG&(Conditions=InStat()))
 	{
@@ -355,15 +393,24 @@ void CursorCommand(PSPAWNINFO pCHAR, PCHAR zLine)
 		CursorRandom=SetLONG(CursorRandom,Parm2 ,"MQ2Cursor","Random",true,15000);
 	else {
 		PCONTENTS Cursor=CursorContents();
-		if(!_strnicmp("rem",Parm1,3) || !_strnicmp("del",Parm1,3)) {
-			if(!Parm2[0] && Cursor) SafeItoa(GetItemFromContents(Cursor)->ItemNumber,Parm2,10);
-			if(Parm2[0] && IsNumber(Parm2)) {
-				WriteChatf ("MQ2Cursor::\ayDELETING ENTRY\ax <\ag%s\ax>.", GetItemFromContents(Cursor)->Name);
-				CursorList->Delete((DWORD)atol(Parm2),CursorSilent);
+		if (!_strnicmp("rem", Parm1, 3) || !_strnicmp("del", Parm1, 3))
+		{
+			if (IsNumber(Parm2))
+			{
+				WriteChatf("MQ2Cursor::\ayDELETING ENTRY\ax <\ag%s\ax>.", GetItemFromContents(Cursor)->Name);
+				CursorList->Delete(atol(Parm2), CursorSilent);
 				CursorList->Export("");
 				return;
 			}
-			NeedHelp=true;
+
+			if (Cursor)
+			{
+				WriteChatf("MQ2Cursor::\ayDELETING ENTRY\ax <\ag%s\ax>.", Cursor->GetItemDefinition()->Name);
+				CursorList->Delete(Cursor->GetItemDefinition()->ItemNumber, CursorSilent);
+				CursorList->Export("");
+				return;
+			}
+			NeedHelp = true;
 		}
 		if(Cursor && !NeedHelp)
 		{
@@ -420,12 +467,12 @@ PLUGIN_API VOID SetGameState(DWORD GameState) {
 			CursorRandom   =GetPrivateProfileInt("MQ2Cursor","Random"  ,0,INIFileName);
 			//CursorDroping  =GetPrivateProfileInt("MQ2Cursor","Droping" ,0,INIFileName);
 		}
-	} else if(GameState!=GAMESTATE_LOGGINGIN) {
-		if(Initialized) {
-			if(CursorList) delete CursorList;
-			CursorList=0;
-			CursorHandle=0;
-			Initialized=0;
+	} else if (GameState != GAMESTATE_LOGGINGIN) {
+		if (Initialized) {
+			if (CursorList) delete CursorList;
+			CursorList = nullptr;
+			CursorHandle = false;
+			Initialized = 0;
 		}
 	}
 }
