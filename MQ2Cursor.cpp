@@ -1,97 +1,163 @@
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
-// Project: MQ2Cursor.cpp   | Fix Random Humanish Delay that wasn't working!
-// Author: s0rCieR          | Make it more user friendly for twisting bard!
-// Updated: eqmule 12/15/14 | Updated to work with The Darkened Sea expansion
-// 4.0 - Eqmule 07-22-2016 - Added string safety.
-// 4.1 - Sym - 06-13-2017 - Removed forced 1 count for non-stackable keep counts
-//                          and added notification when removing an entry
+// Project: MQ2Cursor.cpp
+// Original Author: s0rCieR
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
-#include <mq/Plugin.h>
-#include <moveitem.h>
+#include "mq/Plugin.h"
+#include "mq/base/Enum.h"
+
+#include "moveitem.h"
+
+#include <string_view>
+#include <string>
+#include <chrono>
+
+using namespace std::chrono_literals;
+using namespace std::chrono;
 
 PreSetup("MQ2Cursor");
-PLUGIN_VERSION(4.1);
+PLUGIN_VERSION(4.2);
 
-#define    PLUGIN_FLAG      0xF9FF      // Plugin Auto-Pause Flags (see InStat)
-#define    CURSOR_SPAM       15000      // Cursor Spam Rate Instruction in ms.
-#define    CURSOR_WAIT         250    // Cursor Wait After Manipulation
+constexpr milliseconds CURSOR_SPAM_DELAY = 15000ms;
+constexpr milliseconds CURSOR_WAIT_DELAY = 250ms;
 
-DWORD            Initialized =false;       // Plugin Initialized?
-DWORD            Conditions  =false;       // Window Conditions and Character State
-DWORD            SkipExecuted=false;       // Skip Executed Timer
+static bool s_initialized = false;        // Is the plugin initialized?
+static bool s_cursorActive = false;     // Is cursor handling active?
+static bool s_quiet = false;           // Silence most output if true
+static int s_cursorWarnItemID = NOID;       // Cursor Warned Item ID
+static int s_randomizeCursor = 0;       // Randomized wait time max in ms
 
-PCONTENTS     InvCont     =NULL;           // ItemCounts/Locate/Search Contents
-long          InvSlot     =NOID;           // ItemCounts/Locate/Search Slot ID
+class CursorKeepList;
+static CursorKeepList* s_keepList = nullptr;   // Cursor Keeping List
 
-PCONTENTS     CursorContents();
-long          InStat();
-long          ItemCounts(DWORD ID, long B=0, long E=NUM_INV_SLOTS);
-long          SetBOOL(long Cur, const char* Val, const char* Sec="", const char* Key="");
-long          SetLONG(long Cur, const char* Val, const char* Sec="", const char* Key="", bool ZeroIsOff=false);
-long          StackSize(PCONTENTS Item);
-long          StackUnit(PCONTENTS Item);
-bool          WinState(CXWnd *Wnd);
+static steady_clock::time_point s_cursorWarnTime{};
+static steady_clock::time_point s_nextExecute{};
+static steady_clock::time_point s_randomTimer{};
+
+enum PluginFlags : uint16_t
+{
+	Flag_None = 0x0000,
+
+	Flag_GuildTributeMasterWnd = 0x0001,
+	Flag_TributeMasterWnd = 0x0002,
+	Flag_GuildBankWnd = 0x0004,
+	Flag_TradeWnd = 0x0008,
+	Flag_MerchantWnd = 0x0010,
+	Flag_BankWnd = 0x0020,
+	Flag_GiveWnd = 0x0040,
+	Flag_SpellBookWnd = 0x0080,
+
+	Flag_LootWnd = 0x0200,
+	Flag_InventoryWnd = 0x0400,
+
+	Flag_CastingWnd = 0x1000,
+	Flag_SpellCasting = 0x2000,
+	Flag_SpellInProgress = 0x4000,
+	Flag_Stunned = 0x0100,
+
+	Flag_BusyInventory = Flag_LootWnd | Flag_InventoryWnd,
+	Flag_BusyInventoryFlag = 0x0800,
+
+	Flag_AutoPause = static_cast<uint16_t>(~Flag_BusyInventory),    // 0xF9FF - Plugin Auto-Pause Flags (see UpdateFlags)
+};
+constexpr bool has_bitwise_operations(PluginFlags) { return true; }
+
+PluginFlags s_pluginFlags = Flag_None;         // Window Conditions and Character State
 
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
-bool WinState(CXWnd *Wnd) {
-	return (Wnd && Wnd->IsVisible());
+bool IsWndVisible(CXWnd* wnd)
+{
+	return wnd && wnd->IsVisible();
 }
 
-long StackUnit(PCONTENTS Item) {
-	PITEMINFO pItemInfo = GetItemFromContents(Item);
-	return (pItemInfo && pItemInfo->Type == ITEMTYPE_NORMAL && Item->IsStackable()) ? Item->StackCount : 1;
+int GetStackSize(ItemClient* Item)
+{
+	return Item->GetType() == ITEMTYPE_NORMAL
+		&& Item->IsStackable() ? Item->GetMaxItemCount() : 1;
 }
 
-long StackSize(PCONTENTS Item) {
-	PITEMINFO pItemInfo = GetItemFromContents(Item);
-	return (pItemInfo && pItemInfo->Type == ITEMTYPE_NORMAL && Item->IsStackable()) ? pItemInfo->StackSize : 1;
-}
+int SetSettingInt(const char* Key, const char* Val, int maxValue)
+{
+	int result = GetIntFromString(Val, 0);
+	if (result && result > maxValue)
+	{
+		result = maxValue;
+	}
 
-long SetLONG(long Cur, const char* Val, const char* Sec, const char* Key, bool ZeroIsOff, long Maxi) {
-	char ToStr[16]; char Buffer[128]; long Result=atol(Val);
-	if(Result && Result>Maxi) Result=Maxi;
-	_itoa_s(Result,ToStr,10);
-	if(Sec[0] && Key[0]) WritePrivateProfileString(Sec,Key,ToStr,INIFileName);
-	sprintf_s(Buffer,"%s::%s (\ag%s\ax)",Sec,Key,(ZeroIsOff && !Result)?"\aroff":ToStr);
-	WriteChatColor(Buffer);
-	return Result;
-}
+	if (Key[0])
+	{
+		WritePrivateProfileInt("MQ2Cursor", Key, result, INIFileName);
+	}
 
-long SetBOOL(long Cur, const char* Val, const char* Sec, const char* Key) {
-	char buffer[128]; long result=0;
-	if(!_strnicmp(Val,"false",5) || !_strnicmp(Val,"off",3) || !_strnicmp(Val,"0",1))    result=0;
-	else if(!_strnicmp(Val,"true",4) || !_strnicmp(Val,"on",2) || !_strnicmp(Val,"1",1)) result=1;
-	else result=(!Cur)&1;
-	if(Sec[0] && Key[0]) WritePrivateProfileString(Sec,Key,result?"1":"0",INIFileName);
-	sprintf_s(buffer,"%s::%s (%s)",Sec,Key,result?"\agon\ax":"\agoff\ax");
-	WriteChatColor(buffer);
+	if (result == 0)
+	{
+		WriteChatf("MQ2Cursor::%s (\aroff\ax)", Key);
+	}
+	else
+	{
+		WriteChatf("MQ2Cursor::%s (\ag%d\ax)", Key, result);
+	}
+
 	return result;
 }
 
-long InStat() {
-	Conditions=0x00000000;
-	if(WinState(FindMQ2Window("GuildTributeMasterWnd")))                Conditions|=0x0001;
-	if(WinState(FindMQ2Window("TributeMasterWnd")))                     Conditions|=0x0002;
-	if(WinState(FindMQ2Window("GuildBankWnd")))                         Conditions|=0x0004;
-	if(WinState((CXWnd*)pTradeWnd))                                     Conditions|=0x0008;
-	if(WinState((CXWnd*)pMerchantWnd))                                  Conditions|=0x0010;
-	if(WinState((CXWnd*)pBankWnd))                                      Conditions|=0x0020;
-	if(WinState((CXWnd*)pGiveWnd))                                      Conditions|=0x0040;
-	if(WinState((CXWnd*)pSpellBookWnd))                                 Conditions|=0x0080;
-	if(WinState((CXWnd*)pLootWnd))                                      Conditions|=0x0200;
-	if(WinState((CXWnd*)pInventoryWnd))                                 Conditions|=0x0400;
-	if(WinState((CXWnd*)pCastingWnd))                                   Conditions|=0x1000;
-	if(GetCharInfo()->standstate==STANDSTATE_CASTING)                   Conditions|=0x2000;
-	if(((((PSPAWNINFO)pCharSpawn)->CastingData.SpellSlot)&0xFF)!=0xFF) Conditions|=0x4000;
-	if(GetCharInfo()->Stunned)                                          Conditions|=0x0100;
-	if((Conditions&0x0600)!=0x0600 && (Conditions&0x0600))            Conditions|=0x0800;
-	return Conditions;
+int SetSettingBool(const char* Key, const char* Val, bool currentValue)
+{
+	bool result = GetIntFromString(Val, !currentValue);
+
+	if (Key[0])
+	{
+		WritePrivateProfileBool("MQ2Cursor", Key, result, INIFileName);
+	}
+
+	WriteChatf("MQ2Cursor::%s (%s)", Key, result ? "\agon\ax" : "\agoff\ax");
+	return result;
 }
 
-PCONTENTS CursorContents() {
+PluginFlags UpdateFlags()
+{
+	PluginFlags flags = Flag_None;
+
+	if (IsWndVisible(FindMQ2Window("GuildTributeMasterWnd")))
+		flags |= Flag_GuildTributeMasterWnd;
+	if (IsWndVisible(FindMQ2Window("TributeMasterWnd")))
+		flags |= Flag_TributeMasterWnd;
+	if (IsWndVisible(FindMQ2Window("GuildBankWnd")))
+		flags |= Flag_GuildBankWnd;
+	if (IsWndVisible(pTradeWnd))
+		flags |= Flag_TradeWnd;
+	if (IsWndVisible(pMerchantWnd))
+		flags |= Flag_MerchantWnd;
+	if (IsWndVisible(pBankWnd))
+		flags |= Flag_BankWnd;
+	if (IsWndVisible(pGiveWnd))
+		flags |= Flag_GiveWnd;
+	if (IsWndVisible(pSpellBookWnd))
+		flags |= Flag_SpellBookWnd;
+	if (IsWndVisible(pLootWnd))
+		flags |= Flag_LootWnd;
+	if (IsWndVisible(pInventoryWnd))
+		flags |= Flag_InventoryWnd;
+	if (IsWndVisible(pCastingWnd))
+		flags |= Flag_CastingWnd;
+	if (pLocalPC->standstate == STANDSTATE_CASTING)
+		flags |= Flag_SpellCasting;
+	if (pLocalPlayer->CastingData.SpellSlot != 255)
+		flags |= Flag_SpellInProgress;
+	if (pLocalPC->Stunned)
+		flags |= Flag_Stunned;
+
+	// ???
+	if ((flags & Flag_BusyInventory) != Flag_BusyInventory && flags & Flag_BusyInventory)
+		flags |= Flag_BusyInventoryFlag;
+
+	return flags;
+}
+
+ItemClient* GetCursorItem()
+{
 	return GetPcProfile()->GetInventorySlot(InvSlot_Cursor);
 }
 
@@ -120,9 +186,16 @@ public:
 		id = GetIntFromString(id_, 0);
 	}
 
-	void Display(char action) const
+	enum DisplayAction
 	{
-		if (action != '-')
+		Display_Delete,
+		Display_Insert,
+		Display_Listing,
+	};
+
+	void Display(DisplayAction action) const
+	{
+		if (action != Display_Delete)
 		{
 			char buffer[32];
 			if (qty < -1)
@@ -134,7 +207,7 @@ public:
 			else
 				sprintf_s(buffer, " QTY[\ag%d\ax]", qty);
 
-			if (action == '+')
+			if (action == Display_Insert)
 				WriteChatf("[\ag+\ax] ID[\ag%d\ax] NAME[\ag%s\ax]%s.", id, name.c_str(), buffer);
 			else
 				WriteChatf("[\ay=\ax] ID[\ag%d\ax] NAME[\ag%s\ax]%s FIND[\ag%d\ax].", id, name.c_str(), buffer, CountItemByID(id, BAG_SLOT_START));
@@ -146,21 +219,21 @@ public:
 	}
 };
 
-class ListRec
+class CursorKeepList
 {
-	std::map<int, KeepRec> data;
-	std::string section;
+	std::map<int, KeepRec> m_data;
+	std::string m_section;
 
 public:
-	explicit ListRec(std::string_view section)
-		: section(section)
+	explicit CursorKeepList(std::string_view section)
+		: m_section(section)
 	{
 	}
 
 	KeepRec* Find(int key)
 	{
-		auto iter = data.find(key);
-		if (iter == data.end())
+		auto iter = m_data.find(key);
+		if (iter == m_data.end())
 			return nullptr;
 
 		return &iter->second;
@@ -168,148 +241,156 @@ public:
 
 	void Delete(int key, bool quiet)
 	{
-		auto iter = data.find(key);
-		if (iter != data.end())
+		auto iter = m_data.find(key);
+		if (iter != m_data.end())
 		{
 			if (!quiet)
-				iter->second.Display('-');
+			{
+				iter->second.Display(KeepRec::Display_Delete);
+			}
 
-			data.erase(iter);
+			m_data.erase(iter);
 		}
 	}
 
-	void Insert(const KeepRec& rec, bool quiet)
+	void Insert(KeepRec&& rec, bool quiet)
 	{
 		Delete(rec.id, true);
-		data.emplace(rec.id, rec);
+		auto [iter, _] = m_data.emplace(rec.id, std::move(rec));
 
 		if (!quiet)
-			rec.Display('+');
+		{
+			iter->second.Display(KeepRec::Display_Insert);
+		}
 	}
 
-	void Import(const char* Title)
+	void Import()
 	{
-		if (Title[0])
-			WriteChatColor(Title);
-
-		std::vector<std::string> keys = mq::GetPrivateProfileKeys<MAX_STRING * 10>(section, INIFileName);
+		std::vector<std::string> keys = mq::GetPrivateProfileKeys<MAX_STRING * 10>(m_section, INIFileName);
 		char Temp[MAX_STRING];
 
 		for (const std::string& key : keys)
 		{
-			GetPrivateProfileString(section, key.c_str(), "", Temp, MAX_STRING, INIFileName);
+			GetPrivateProfileString(m_section, key.c_str(), "", Temp, MAX_STRING, INIFileName);
+
 			if (Temp[0])
+			{
 				Insert(KeepRec(key.c_str(), Temp), true);
+			}
 		}
 	}
 
-	void Export(const char* Title)
+	void Export()
 	{
-		if (Title[0])
-			WriteChatColor(Title);
+		::WritePrivateProfileStringA(m_section.c_str(), nullptr, nullptr, INIFileName);
 
-		::WritePrivateProfileStringA(section.c_str(), nullptr, nullptr, INIFileName);
-
-		char BUF[MAX_STRING];
-		for (const auto& [_, rec] : data)
+		char buf[MAX_STRING];
+		for (const auto& [_, rec] : m_data)
 		{
 			if (rec.qty != 0)
-				sprintf_s(BUF, "%s|%d", rec.name.c_str(), rec.qty);
+				sprintf_s(buf, "%s|%d", rec.name.c_str(), rec.qty);
 			else
-				strcpy_s(BUF, rec.name.c_str());
+				strcpy_s(buf, rec.name.c_str());
 
-			WritePrivateProfileString(section, std::to_string(rec.id), BUF, INIFileName);
+			WritePrivateProfileString(m_section, std::to_string(rec.id), buf, INIFileName);
 		}
 	}
 
-	void Listing(const char* Title, const char* Search)
+	void PrintListing(const char* Search)
 	{
-		if (Title[0])
-			WriteChatColor(Title);
-
-		WriteChatColor("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-");
-
-		for (const auto& [_, rec] : data)
+		for (const auto& [_, rec] : m_data)
 		{
 			if (!Search[0] || find_substr(rec.name, Search))
-				rec.Display('=');
+			{
+				rec.Display(KeepRec::Display_Listing);
+			}
 		}
-
-		WriteChatColor("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-");
 	}
 };
 
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
-bool       CursorHandle      = false;    // Cursor Handle?
-bool       CursorSilent      = false;    // Cursor Silent Operating?
-long       CursorWarnItem    = NOID;     // Cursor Warned Item ID
-long       CursorWarnTime    = 0;        // Cursor Warned Time ID
-long       CursorRandom      = 0;        // Cursor Random Wait
-DWORD      CursorTimer       = 0;        // Cursor Timer
-ListRec*   CursorList        = nullptr;  // Cursor Keeping List
-
-//=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
-//=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
-
 void DestroyCommand()
 {
-	if(!(PLUGIN_FLAG&(Conditions)))
+	if (s_pluginFlags & Flag_AutoPause)
+		return;
+
+	PcProfile* pcProfile = GetPcProfile();
+
+	if (pcProfile->CursorPlat)
 	{
-		char Buffers[128]; const char* Display=Buffers;
-		if(GetPcProfile()->CursorPlat)        Display="MQ2Cursor::\ayDESTROYING\ax <\arPlat\ax>.";
-		else if(GetPcProfile()->CursorGold)   Display="MQ2Cursor::\ayDESTROYING\ax <\arGold\ax>.";
-		else if(GetPcProfile()->CursorSilver) Display="MQ2Cursor::\ayDESTROYING\ax <\arSilver\ax>.";
-		else if(GetPcProfile()->CursorCopper) Display="MQ2Cursor::\ayDESTROYING\ax <\arCopper\ax>.";
-		else if(PCONTENTS Cursor=CursorContents()) sprintf_s(Buffers,"MQ2Cursor::\ayDESTROYING\ax <\ar%s\ax>.", GetItemFromContents(Cursor)->Name);
-		else return;
-		if(!CursorSilent) WriteChatColor(Display);
-		EQDestroyHeldItemOrMoney(GetCharInfo()->pSpawn,NULL);
+		if (!s_quiet)
+		{
+			WriteChatColor("MQ2Cursor::\ayDESTROYING\ax <\arPlat\ax>.");
+		}
 	}
+	else if (pcProfile->CursorGold)
+	{
+		if (!s_quiet)
+		{
+			WriteChatColor("MQ2Cursor::\ayDESTROYING\ax <\arGold\ax>.");
+		}
+	}
+	else if (pcProfile->CursorSilver)
+	{
+		if (!s_quiet)
+		{
+			WriteChatColor("MQ2Cursor::\ayDESTROYING\ax <\arSilver\ax>.");
+		}
+	}
+	else if (pcProfile->CursorCopper)
+	{
+		if (!s_quiet)
+		{
+			WriteChatColor("MQ2Cursor::\ayDESTROYING\ax <\arCopper\ax>.");
+		}
+	}
+	else if (ItemClient* cursorItem = GetCursorItem())
+	{
+		if (!s_quiet)
+		{
+			WriteChatf("MQ2Cursor::\ayDESTROYING\ax <\ar%s\ax>.", cursorItem->GetName());
+		}
+	}
+	else
+	{
+		return;
+	}
+
+	DoCommand("/destroy", false);
 }
 
-// dropping items on the ground is no longer possible
-/*
-void DropCommand() {
-	if(!(PLUGIN_FLAG&(Conditions))) if(PCONTENTS Cursor=CursorContents()) if(Cursor->Item->NoDrop) {
-		if(!CursorSilent) WriteChatf("MQ2Cursor::\ayDROPPING\ax <\ar%s\ax>.",Cursor->Item->Name);
-		DropCmd(GetCharInfo()->pSpawn,NULL);
-	}
-}
-*/
-
-void SendWornClick(char* pcScreenID, unsigned long ulKeyState)
+void SendWornClick(const char* screenID, unsigned int ulKeyState)
 {
 	if (pInventoryWnd)
 	{
-		if (CXWnd* wndInv = pInventoryWnd->GetChildItem(pcScreenID))
+		if (CXWnd* wndInv = pInventoryWnd->GetChildItem(screenID))
 		{
-			int KeyboardFlags[4] = { 0 };
-			*(unsigned long*)&KeyboardFlags = *(unsigned long*)&pWndMgr->KeyboardFlags;
-			*(unsigned long*)&pWndMgr->KeyboardFlags = ulKeyState;
+			int keyboardFlags = *reinterpret_cast<unsigned int*>(&pWndMgr->KeyboardFlags);
+			*reinterpret_cast<unsigned int*>(&pWndMgr->KeyboardFlags) = ulKeyState;
 			SendWndClick2(wndInv, "leftmouseup");
-			*(unsigned long*)&pWndMgr->KeyboardFlags = *(unsigned long*)&KeyboardFlags;
+			*reinterpret_cast<unsigned int*>(&pWndMgr->KeyboardFlags) = keyboardFlags;
 		}
 	}
 }
 
-void KeepCommand(PlayerClient*, const char* zLine)
+void KeepCommand(PlayerClient* = nullptr, const char* = nullptr)
 {
-	if (PLUGIN_FLAG&(Conditions=InStat()))
+	if (s_pluginFlags & Flag_AutoPause)
 	{
 		WriteChatf("MQ2Cursor:: Conditions prevent item movement.");
 		return;
 	}
-	PCONTENTS Cursor = CursorContents();
-	if (!Cursor) return;
 
-	long fSLOT=0; long fSWAP=0; long fSIZE=10;
+	ItemClient* cursorItem = GetCursorItem();
+	if (!cursorItem)
+		return;
 
-	long lSlot = 0;
+	int lSlot = 0;
 
 	// if there is a pack on cursor
-	if (TypePack(Cursor))
+	if (cursorItem->IsContainer())
 	{
 		lSlot = FindSlotForPack();
 		if (lSlot == NOID)
@@ -320,188 +401,278 @@ void KeepCommand(PlayerClient*, const char* zLine)
 	}
 	else
 	{
-		lSlot = FreeSlotForItem(Cursor);
+		lSlot = FreeSlotForItem(cursorItem);
 	}
 
 	// if there is a main inv slot for this move
 	if (lSlot)
 	{
-		if(!CursorSilent) WriteChatf("MQ2Cursor::\ayKEEPING\ax <\ag%s\ax>.", GetItemFromContents(Cursor)->Name);
+		if (!s_quiet)
+		{
+			WriteChatf("MQ2Cursor::\ayKEEPING\ax <\ag%s\ax>.", cursorItem->GetName());
+		}
 
-		char szInvSlot[20];
 		if (lSlot == NOID) // if the slot is accessed via autoinventory
 		{
 			EzCommand("/autoinventory");
 		}
 		else
 		{
+			char szInvSlot[20];
 			sprintf_s(szInvSlot, "InvSlot%d", lSlot);
 			SendWornClick(szInvSlot, 1);
+
 			// if we swapped something (bag on cursor) autoinv it
 			if (CursorHasItem())
+			{
 				EzCommand("/autoinventory");
+			}
 		}
 	}
 }
 
 void HandleCommand()
 {
-	if (!(PLUGIN_FLAG&(Conditions))) if(PCONTENTS Cursor=CursorContents()) {
-		DWORD LastNumber=0xFFFFFFFF;
-		PITEMINFO pCursor = GetItemFromContents(Cursor);
-		while (pCursor && pCursor->ItemNumber != LastNumber)
+	if (s_pluginFlags & Flag_AutoPause)
+		return;
+
+	if (ItemClient* cursorItem = GetCursorItem())
+	{
+		int itemID = -1;
+
+		while (cursorItem && cursorItem->GetID() != itemID)
 		{
-			LastNumber = pCursor->ItemNumber;
-			if (KeepRec *LookUp=CursorList->Find(LastNumber))
+			itemID = cursorItem->GetID();
+
+			if (KeepRec* LookUp = s_keepList->Find(itemID))
 			{
-				if (LookUp->qty<0 || LookUp->qty - (long)CountItemByID(LastNumber)>0)        KeepCommand(NULL,"");
-				//else if(CursorDroping && Cursor->Item->NoDrop)                        DropCommand();
-				else                                                                  DestroyCommand();
+				if (LookUp->qty < 0 || LookUp->qty - CountItemByID(itemID) > 0)
+					KeepCommand();
+				else
+					DestroyCommand();
 			}
-			else if (!CursorSilent && ((DWORD)CursorWarnItem!=LastNumber || clock()>CursorWarnTime))
+			else if (!s_quiet)
 			{
-				WriteChatf("MQ2Cursor::\ayREQUIRE\ax Instruction <\ag%s\ax>%s.", pCursor->Name, ItemIsStackable(Cursor) ? " [\aySTACKABLE\ax]" : "");
-				CursorWarnItem=LastNumber;
-				CursorWarnTime=clock()+CURSOR_SPAM;
-				return;
+				steady_clock::time_point now = steady_clock::now();
+
+				if (s_cursorWarnItemID != itemID || now > s_cursorWarnTime)
+				{
+					WriteChatf("MQ2Cursor::\ayREQUIRE\ax Instruction <\ag%s\ax>%s.", cursorItem->GetName(), cursorItem->IsStackable() ? " [\aySTACKABLE\ax]" : "");
+
+					s_cursorWarnItemID = itemID;
+					s_cursorWarnTime = now + CURSOR_SPAM_DELAY;
+					return;
+				}
 			}
-			Cursor=CursorContents();
+
+			cursorItem = GetCursorItem();
 		}
 	}
 }
 
-void CursorCommand(PSPAWNINFO pCHAR, PCHAR zLine)
+void CursorCommand(PlayerClient*, const char* zLine)
 {
-	bool NeedHelp=false;
-	char Parm1[MAX_STRING]; GetArg(Parm1,zLine,1);
-	char Parm2[MAX_STRING]; GetArg(Parm2,zLine,2);
-	if((!Parm1[0] && !CursorHasItem()) || !_stricmp("help",Parm1)) NeedHelp=true;
-	else if(!_stricmp("load",Parm1)) CursorList->Import("MQ2Cursor::\ayLOADING\ax Item List...");
-	else if(!_stricmp("save",Parm1)) CursorList->Export("MQ2Cursor::\aySAVING\ax Item List...");
-	else if(!_stricmp("list",Parm1)) CursorList->Listing("MQ2Cursor::\ayLISTING\ax Item List...",Parm2);
-	//else if(!_stricmp("nodrop",Parm1) || !_stricmp("dropping",Parm1))
-		//CursorDroping=SetBOOL(CursorDroping,Parm2,"MQ2Cursor","Droping");
-	else if(!_stricmp("silent",Parm1) || !_stricmp("quiet",Parm1))
-		CursorSilent=SetBOOL(CursorSilent ,Parm2,"MQ2Cursor","Silent");
-	else if(!_stricmp("on",Parm1) || !_stricmp("true",Parm1))
-		CursorHandle=SetBOOL(CursorHandle ,"on" ,"MQ2Cursor","Active");
-	else if(!_stricmp("off",Parm1) || !_stricmp("false",Parm1))
-		CursorHandle=SetBOOL(CursorHandle ,"off","MQ2Cursor","Active");
-	else if(!_stricmp("auto",Parm1))
-		CursorHandle=SetBOOL(CursorHandle ,""   ,"MQ2Cursor","Active");
-	else if(!_stricmp("random",Parm1))
-		CursorRandom=SetLONG(CursorRandom,Parm2 ,"MQ2Cursor","Random",true,15000);
-	else {
-		PCONTENTS Cursor=CursorContents();
-		if (!_strnicmp("rem", Parm1, 3) || !_strnicmp("del", Parm1, 3))
+	bool showHelp = false;
+	char param1[MAX_STRING];
+	GetArg(param1, zLine, 1);
+	char param2[MAX_STRING];
+	GetArg(param2, zLine, 2);
+
+	if ((!param1[0] && !CursorHasItem()) || ci_equals("help", param1))
+	{
+		showHelp = true;
+	}
+	else if (ci_equals("load", param1))
+	{
+		WriteChatColor("MQ2Cursor::\ayLOADING\ax Item List...");
+		s_keepList->Import();
+	}
+	else if (ci_equals("save", param1))
+	{
+		WriteChatColor("MQ2Cursor::\aySAVING\ax Item List...");
+		s_keepList->Export();
+	}
+	else if (ci_equals("list", param1))
+	{
+		WriteChatColor("MQ2Cursor::\ayLISTING\ax Item List...");
+		WriteChatColor("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-");
+
+		s_keepList->PrintListing(param2);
+
+		WriteChatColor("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-");
+
+	}
+	else if (ci_equals("silent", param1) || ci_equals("quiet", param1))
+	{
+		s_quiet = SetSettingBool("Silent", param2, s_quiet);
+	}
+	else if (ci_equals("on", param1) || ci_equals("true", param1))
+	{
+		s_cursorActive = SetSettingBool("Active", "on", s_cursorActive);
+	}
+	else if (ci_equals("off", param1) || ci_equals("false", param1))
+	{
+		s_cursorActive = SetSettingBool("Active", "off", s_cursorActive);
+	}
+	else if (ci_equals("auto", param1))
+	{
+		s_cursorActive = SetSettingBool("Active", "", s_cursorActive);
+	}
+	else if (ci_equals("random", param1))
+	{
+		s_randomizeCursor = SetSettingInt("Random", param2, 15000);
+	}
+	else
+	{
+		ItemClient* cursorItem = GetCursorItem();
+
+		if (ci_starts_with(param1, "rem") || ci_starts_with(param1, "del"))
 		{
-			if (IsNumber(Parm2))
+			if (IsNumber(param2))
 			{
-				WriteChatf("MQ2Cursor::\ayDELETING ENTRY\ax <\ag%s\ax>.", GetItemFromContents(Cursor)->Name);
-				CursorList->Delete(atol(Parm2), CursorSilent);
-				CursorList->Export("");
+				WriteChatf("MQ2Cursor::\ayDELETING ENTRY\ax <\ag%s\ax>.", cursorItem->GetName());
+
+				s_keepList->Delete(atol(param2), s_quiet);
+				s_keepList->Export();
 				return;
 			}
 
-			if (Cursor)
+			if (cursorItem)
 			{
-				WriteChatf("MQ2Cursor::\ayDELETING ENTRY\ax <\ag%s\ax>.", Cursor->GetItemDefinition()->Name);
-				CursorList->Delete(Cursor->GetItemDefinition()->ItemNumber, CursorSilent);
-				CursorList->Export("");
+				WriteChatf("MQ2Cursor::\ayDELETING ENTRY\ax <\ag%s\ax>.", cursorItem->GetName());
+
+				s_keepList->Delete(cursorItem->GetID(), s_quiet);
+				s_keepList->Export();
 				return;
 			}
-			NeedHelp = true;
+
+			showHelp = true;
 		}
-		if(Cursor && !NeedHelp)
+
+		if (cursorItem && !showHelp)
 		{
-			if(Parm1[0] && (IsNumber(Parm1) || !_strnicmp(Parm1,"al",2) || !_strnicmp(Parm1,"pro",3)))
+			if (param1[0]
+				&& (IsNumber(param1)
+					|| ci_starts_with(param1, "al") || ci_starts_with(param1, "pro")))
 			{
-				long HowMany=atol(Parm1);
-				if(!_strnicmp(Parm1,"pro",3))        HowMany=-2;
-				else if(!_strnicmp(Parm1,"al",2))    HowMany=-1;
-				else if(!_strnicmp(Parm2,"st",2))    HowMany*=StackSize(Cursor);
-				//if(HowMany>1 && !ItemIsStackable(Cursor)) HowMany=1;
-				PITEMINFO pCursor = GetItemFromContents(Cursor);
-				if(HowMany < -1)    WriteChatf("MQ2Cursor::\ayPROTECT\ax <\ag%s\ax> [\agALL\ax].", pCursor->Name);
-				else if(HowMany <0) WriteChatf("MQ2Cursor::\ayKEEPING\ax <\ag%s\ax> [\agALL\ax].", pCursor->Name);
-				else if(HowMany >0) WriteChatf("MQ2Cursor::\ayKEEPING\ax <\ag%s\ax> Up To [\ag%d\ax]", pCursor->Name, HowMany);
-				else                WriteChatf("MQ2Cursor::\ayDESTROYING\ax <\ag%s\ax> [\agALL\ax].", pCursor->Name);
-				CursorList->Insert(KeepRec(pCursor->Name, pCursor->ItemNumber, HowMany), CursorSilent);
-				CursorList->Export("");
+				int howMany = atol(param1);
+
+				if (ci_starts_with(param1, "pro"))
+					howMany = -2;
+				else if (ci_starts_with(param1, "al"))
+					howMany = -1;
+				else if (ci_starts_with(param2, "st"))
+					howMany *= GetStackSize(cursorItem);
+
+				if (howMany < -1)
+					WriteChatf("MQ2Cursor::\ayPROTECT\ax <\ag%s\ax> [\agALL\ax].", cursorItem->GetName());
+				else if (howMany < 0)
+					WriteChatf("MQ2Cursor::\ayKEEPING\ax <\ag%s\ax> [\agALL\ax].", cursorItem->GetName());
+				else if (howMany > 0)
+					WriteChatf("MQ2Cursor::\ayKEEPING\ax <\ag%s\ax> Up To [\ag%d\ax]", cursorItem->GetName(), howMany);
+				else
+					WriteChatf("MQ2Cursor::\ayDESTROYING\ax <\ag%s\ax> [\agALL\ax].", cursorItem->GetName());
+
+				s_keepList->Insert(KeepRec(cursorItem->GetName(), cursorItem->GetID(), howMany), s_quiet);
+				s_keepList->Export();
 				return;
 			}
-			if(CursorHandle)
+
+			if (s_cursorActive)
 			{
 				HandleCommand();
 				return;
 			}
-			NeedHelp=true;
+
+			showHelp = true;
 		}
 	}
-	if(NeedHelp)
+
+	if (showHelp)
 	{
 		WriteChatColor("Usage:");
-		WriteChatColor("       /cursor on|off");
-		WriteChatColor("       /cursor silent on|off");
-		WriteChatColor("       /cursor rem(ove)|del(ete) id|itemoncursor");
-		WriteChatColor("       /cursor load|save|list|help");
-		WriteChatColor("       /cursor al(l(ways))");
-		WriteChatColor("       /cursor pro(tect)");
-		WriteChatColor("       /cursor #[ st(acks)]");
-		WriteChatColor("       /cursor random #");
+		WriteChatColor("    /cursor on|off");
+		WriteChatColor("    /cursor silent on|off");
+		WriteChatColor("    /cursor rem(ove)|del(ete) id|itemoncursor");
+		WriteChatColor("    /cursor load|save|list|help");
+		WriteChatColor("    /cursor al(l(ways))");
+		WriteChatColor("    /cursor pro(tect)");
+		WriteChatColor("    /cursor #[ st(acks)]");
+		WriteChatColor("    /cursor random #");
 	}
 }
 
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=//
 
-PLUGIN_API VOID SetGameState(DWORD GameState) {
-	if(GameState==GAMESTATE_INGAME) {
-		if(!Initialized) {
-			Initialized=true;
-			sprintf_s(INIFileName,"%s\\%s_%s.ini", gPathConfig, GetServerShortName(), pLocalPC->Name);
-			CursorList=new ListRec("MQ2Cursor_ItemList");
-			CursorList->Import("");
-			CursorHandle   =GetPrivateProfileInt("MQ2Cursor","Active"  ,0,INIFileName);
-			CursorSilent   =GetPrivateProfileInt("MQ2Cursor","Silent"  ,0,INIFileName);
-			CursorRandom   =GetPrivateProfileInt("MQ2Cursor","Random"  ,0,INIFileName);
-			//CursorDroping  =GetPrivateProfileInt("MQ2Cursor","Droping" ,0,INIFileName);
+PLUGIN_API void SetGameState(DWORD GameState)
+{
+	if (GameState == GAMESTATE_INGAME)
+	{
+		if (!s_initialized && pLocalPC != nullptr)
+		{
+			s_initialized = true;
+			sprintf_s(INIFileName, "%s\\%s_%s.ini", gPathConfig, GetServerShortName(), pLocalPC->Name);
+			s_keepList = new CursorKeepList("MQ2Cursor_ItemList");
+			s_keepList->Import();
+			s_cursorActive = GetPrivateProfileBool("MQ2Cursor", "Active", false, INIFileName);
+			s_quiet = GetPrivateProfileBool("MQ2Cursor", "Silent", false, INIFileName);
+			s_randomizeCursor = GetPrivateProfileInt("MQ2Cursor", "Random", 0, INIFileName);
 		}
-	} else if (GameState != GAMESTATE_LOGGINGIN) {
-		if (Initialized) {
-			if (CursorList) delete CursorList;
-			CursorList = nullptr;
-			CursorHandle = false;
-			Initialized = 0;
+	}
+	else if (GameState != GAMESTATE_LOGGINGIN)
+	{
+		if (s_initialized)
+		{
+			delete s_keepList;
+			s_keepList = nullptr;
+			s_cursorActive = false;
+			s_initialized = false;
 		}
 	}
 }
 
-PLUGIN_API VOID InitializePlugin() {
-	AddCommand("/cursor",CursorCommand);
-	AddCommand("/keep",KeepCommand);
+PLUGIN_API void InitializePlugin()
+{
+	AddCommand("/cursor", CursorCommand);
+	AddCommand("/keep", KeepCommand);
 }
 
-PLUGIN_API VOID ShutdownPlugin() {
-	if(CursorList) delete CursorList;
+PLUGIN_API void ShutdownPlugin()
+{
+	delete s_keepList;
+	s_keepList = nullptr;
+
 	RemoveCommand("/cursor");
 	RemoveCommand("/keep");
 }
 
-PLUGIN_API VOID OnPulse()
+PLUGIN_API void OnPulse()
 {
-	if(Initialized && gbInZone && pCharSpawn && GetPcProfile() && !(PLUGIN_FLAG&InStat()))
+	if (!s_initialized || !gbInZone || !pLocalPlayer || !pLocalPC)
+		return;
+
+	s_pluginFlags = UpdateFlags();
+	if (s_pluginFlags & Flag_AutoPause)
+		return;
+
+	if (s_cursorActive && GetCursorItem())
 	{
-		DWORD PulseTimer=(DWORD)clock();
-		if(CursorHandle && CursorContents() && PulseTimer>SkipExecuted)
+		std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+		if (now < s_nextExecute)
+			return;
+
+		if (s_randomTimer.time_since_epoch().count() == 0 && s_randomizeCursor != 0)
 		{
-			if (!CursorTimer && CursorRandom) CursorTimer = PulseTimer + (CursorRandom * rand() / RAND_MAX);
-			if (PulseTimer >= CursorTimer || IsCasting())
-			{
-				HandleCommand();
-				CursorTimer = 0;
-				SkipExecuted = PulseTimer + CURSOR_WAIT;
-			}
+			s_randomTimer = now + std::chrono::milliseconds(s_randomizeCursor * rand() / RAND_MAX);
+		}
+
+		if (now >= s_randomTimer || IsCasting())
+		{
+			HandleCommand();
+
+			s_randomTimer = {};
+			s_nextExecute = now + CURSOR_WAIT_DELAY;
 		}
 	}
 }
