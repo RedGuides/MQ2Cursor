@@ -208,7 +208,7 @@ public:
 		if (Title[0])
 			WriteChatColor(Title);
 
-		WritePrivateProfileString(section, nullptr, nullptr, INIFileName);
+		::WritePrivateProfileStringA(section.c_str(), nullptr, nullptr, INIFileName);
 
 		char BUF[MAX_STRING];
 		for (const auto& [_, rec] : data)
